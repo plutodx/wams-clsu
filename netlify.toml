@@ -1,0 +1,11 @@
+# Netlify configuration for the WAMS front-end (React + Vite)
+[build]
+  base = "client"
+  command = "npm run build"
+  publish = "dist"
+
+# Single-page-app routing: send all paths to index.html so React Router works
+[[redirects]]
+  from = "/*"
+  to = "/index.html"
+  status = 200

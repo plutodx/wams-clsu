@@ -1,0 +1,14 @@
+# dependencies
+node_modules/
+
+# build output
+client/dist/
+
+# database + logs (runtime)
+server/data.db
+server/data.db-*
+*.log
+
+# os / editor
+.DS_Store
+.vscode/
