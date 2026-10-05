@@ -1,5 +1,6 @@
 import { useState } from 'react'
 import { Link } from 'react-router-dom'
+import AuthShell from '../components/AuthShell.jsx'
 
 export default function ForgotPassword() {
   const [email, setEmail] = useState('')
@@ -12,8 +13,7 @@ export default function ForgotPassword() {
   }
 
   return (
-    <div className="auth-wrap">
-      <div className="card">
+    <AuthShell subtitle="Recover your account.">
         <h1 className="page-title">Forgot Password</h1>
         <p className="page-sub">Enter your email and we'll send you a link to reset your password.</p>
         {sent ? (
@@ -31,7 +31,6 @@ export default function ForgotPassword() {
         <p className="small muted" style={{ marginTop: 16 }}>
           Remembered it? <Link to="/login">Back to sign in</Link>
         </p>
-      </div>
-    </div>
+    </AuthShell>
   )
 }

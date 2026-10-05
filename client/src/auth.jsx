@@ -20,14 +20,21 @@ export function AuthProvider({ children }) {
     const d = await api('/api/auth/login', { method: 'POST', body: { email, password } })
     setToken(d.token); setUser(d.user); return d.user
   }
+  // Registration no longer signs the user in. It creates an unverified account and
+  // triggers a verification email; the user signs in only after verifying.
   const register = async (payload) => {
-    const d = await api('/api/auth/register', { method: 'POST', body: payload })
-    setToken(d.token); setUser(d.user); return d.user
+    return api('/api/auth/register', { method: 'POST', body: payload })
   }
-  const logout = () => { clearToken(); setUser(null) }
+  const refreshUser = async () => {
+    const d = await api('/api/auth/me'); setUser(d.user); return d.user
+  }
+  const logout = async () => {
+    try { await api('/api/auth/logout', { method: 'POST' }) } catch (e) { /* ignore */ }
+    clearToken(); setUser(null)
+  }
 
   return (
-    <AuthContext.Provider value={{ user, loading, login, register, logout }}>
+    <AuthContext.Provider value={{ user, loading, login, register, refreshUser, logout }}>
       {children}
     </AuthContext.Provider>
   )

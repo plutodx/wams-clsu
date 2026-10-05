@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import { api } from '../api.js'
+import PieChart from '../components/PieChart.jsx'
 
 function Bar({ label, value, max }) {
   const pct = max ? Math.round((value / max) * 100) : 0
@@ -21,6 +22,8 @@ export default function Reports() {
   if (!sum) return <div className="center muted">Loading...</div>
   const maxStatus = Math.max(1, ...sum.byStatus.map((x) => x.count))
   const maxType = Math.max(1, ...sum.byType.map((x) => x.count))
+  const byCategory = sum.byCategory || []
+  const maxCat = Math.max(1, ...byCategory.map((x) => x.count))
 
   return (
     <div className="container">
@@ -31,6 +34,11 @@ export default function Reports() {
         <div className="card stat"><div className="num">{sum.pending}</div><div className="lbl">In progress</div></div>
         <div className="card stat"><div className="num">{sum.approved}</div><div className="lbl">Approved</div></div>
       </div>
+      <div className="grid cols-2" style={{ marginBottom: 16 }}>
+        <PieChart title="Share by status" data={sum.byStatus} labelKey="status" />
+        <PieChart title="Share by requestor category" data={byCategory} labelKey="category" />
+      </div>
+
       <div className="grid cols-2">
         <div className="card">
           <strong>Requests by status</strong>
@@ -44,6 +52,13 @@ export default function Reports() {
           <div style={{ marginTop: 12 }}>
             {sum.byType.map((s) => <Bar key={s.doc_type} label={s.doc_type} value={s.count} max={maxType} />)}
             {sum.byType.length === 0 && <p className="muted">No data yet.</p>}
+          </div>
+        </div>
+        <div className="card">
+          <strong>Requests by requestor category</strong>
+          <div style={{ marginTop: 12 }}>
+            {byCategory.map((s) => <Bar key={s.category} label={s.category} value={s.count} max={maxCat} />)}
+            {byCategory.length === 0 && <p className="muted">No data yet.</p>}
           </div>
         </div>
       </div>

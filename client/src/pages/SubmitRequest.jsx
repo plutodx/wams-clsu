@@ -1,9 +1,11 @@
 import { useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { api } from '../api.js'
+import { useAuth } from '../auth.jsx'
 
 export default function SubmitRequest() {
   const nav = useNavigate()
+  const { user } = useAuth()
   const [workflows, setWorkflows] = useState([])
   const [docType, setDocType] = useState('')
   const [title, setTitle] = useState('')
@@ -30,7 +32,15 @@ export default function SubmitRequest() {
   return (
     <div className="container">
       <h1 className="page-title">Submit a Request</h1>
-      <p className="page-sub">Choose a document type. The system routes it automatically through the correct approvers.</p>
+      <p className="page-sub">
+        Choose a document type. The system routes it automatically through the correct approvers.
+        {user?.category && <> Showing forms for <strong>{user.category}</strong> requestors.</>}
+      </p>
+      {workflows.length === 0 && (
+        <div className="notice" style={{ marginBottom: 16 }}>
+          No request types are set up for your category yet. Contact the administrator.
+        </div>
+      )}
       <div className="grid cols-2">
         <div className="card">
           <form onSubmit={submit}>

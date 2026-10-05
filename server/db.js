@@ -20,6 +20,16 @@ if (process.env.DATABASE_URL) {
   console.log('No DATABASE_URL set - using in-memory database (data resets on restart)');
 }
 
+// A simple stored signature (SVG data URL) so seeded approvers can approve immediately.
+// Real approvers draw theirs once in Account > Signature.
+function seedSignature(name) {
+  const svg =
+    `<svg xmlns='http://www.w3.org/2000/svg' width='260' height='70'>` +
+    `<text x='8' y='46' font-family='Segoe Script, Brush Script MT, cursive' font-size='30' fill='#123c1a'>${name}</text>` +
+    `<line x1='8' y1='56' x2='250' y2='56' stroke='#9bbfa6' stroke-width='1'/></svg>`;
+  return 'data:image/svg+xml;base64,' + Buffer.from(svg).toString('base64');
+}
+
 async function init() {
   await pool.query(`
     CREATE TABLE IF NOT EXISTS users (
@@ -30,6 +40,11 @@ async function init() {
       role TEXT NOT NULL,
       approver_role TEXT,
       office TEXT,
+      category TEXT,
+      signature TEXT,
+      email_verified INTEGER DEFAULT 0,
+      verify_token TEXT,
+      verify_expires TIMESTAMPTZ,
       created_at TIMESTAMPTZ DEFAULT NOW()
     );
     CREATE TABLE IF NOT EXISTS workflows (
@@ -50,6 +65,7 @@ async function init() {
       id SERIAL PRIMARY KEY,
       reference_no TEXT NOT NULL UNIQUE,
       requestor_id INTEGER NOT NULL,
+      requestor_category TEXT,
       workflow_id INTEGER,
       doc_type TEXT NOT NULL,
       title TEXT NOT NULL,
@@ -78,6 +94,8 @@ async function init() {
       actor_name TEXT,
       action TEXT NOT NULL,
       detail TEXT,
+      ip_address TEXT,
+      data TEXT,
       created_at TIMESTAMPTZ DEFAULT NOW()
     );
     CREATE TABLE IF NOT EXISTS notifications (
@@ -97,36 +115,52 @@ async function seed() {
   if (rows[0].n > 0) { console.log('Database already seeded.'); return; }
 
   const pw = bcrypt.hashSync('password123', 10);
+  // [name, email, role, approver_role, office, category]
   const users = [
-    ['System Administrator', 'admin@clsu.edu.ph', 'admin', null, 'MIS Office'],
-    ['Maria Santos (Requestor)', 'requestor@clsu.edu.ph', 'requestor', null, 'College of Engineering'],
-    ['Office Staff', 'staff@clsu.edu.ph', 'staff', null, 'Records Office'],
-    ['Engr. Dela Cruz (Supervisor)', 'supervisor@clsu.edu.ph', 'approver', 'supervisor', 'College of Engineering'],
-    ['Dr. Reyes (Department Head)', 'depthead@clsu.edu.ph', 'approver', 'dept_head', 'College of Engineering'],
-    ['HRMO Officer', 'hr@clsu.edu.ph', 'approver', 'hr_office', 'Human Resource Management Office'],
-    ['Dean Gonzales', 'dean@clsu.edu.ph', 'approver', 'dean', 'College of Engineering'],
-    ['Budget Officer', 'budget@clsu.edu.ph', 'approver', 'budget_office', 'Budget Office'],
-    ['Prof. Aquino (Instructor)', 'instructor@clsu.edu.ph', 'approver', 'instructor', 'College of Engineering'],
-    ['Registrar Staff', 'registrar@clsu.edu.ph', 'approver', 'registrar', 'Office of the Registrar'],
+    ['System Administrator', 'admin@clsu.edu.ph', 'admin', null, 'MIS Office', null],
+    ['Maria Santos (Faculty)', 'faculty@clsu.edu.ph', 'requestor', null, 'College of Engineering', 'Faculty'],
+    ['Jose Ramos (Staff)', 'staffreq@clsu.edu.ph', 'requestor', null, 'General Services Office', 'Staff'],
+    ['Ana Cruz (Student)', 'student@clsu.edu.ph', 'requestor', null, 'College of Engineering', 'Student'],
+    ['Office Staff (Records)', 'staff@clsu.edu.ph', 'staff', null, 'Records Office', null],
+    ['Engr. Dela Cruz (Supervisor)', 'supervisor@clsu.edu.ph', 'approver', 'supervisor', 'College of Engineering', null],
+    ['Dr. Reyes (Department Head)', 'depthead@clsu.edu.ph', 'approver', 'dept_head', 'College of Engineering', null],
+    ['HRMO Officer', 'hr@clsu.edu.ph', 'approver', 'hr_office', 'Human Resource Management Office', null],
+    ['Dean Gonzales', 'dean@clsu.edu.ph', 'approver', 'dean', 'College of Engineering', null],
+    ['Budget Officer', 'budget@clsu.edu.ph', 'approver', 'budget_office', 'Budget Office', null],
+    ['Prof. Aquino (Instructor)', 'instructor@clsu.edu.ph', 'approver', 'instructor', 'College of Engineering', null],
+    ['Registrar Staff', 'registrar@clsu.edu.ph', 'approver', 'registrar', 'Office of the Registrar', null],
+    ['GSO Head', 'gso@clsu.edu.ph', 'approver', 'gso', 'General Services Office', null],
   ];
   for (const u of users) {
+    const sig = u[2] === 'approver' ? seedSignature(u[0].replace(/\s*\(.*\)/, '')) : null;
     await pool.query(
-      'INSERT INTO users (name,email,password_hash,role,approver_role,office) VALUES ($1,$2,$3,$4,$5,$6)',
-      [u[0], u[1], pw, u[2], u[3], u[4]]
+      `INSERT INTO users (name,email,password_hash,role,approver_role,office,category,signature,email_verified)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,1)`,
+      [u[0], u[1], pw, u[2], u[3], u[4], u[5], sig]
     );
   }
 
+  // Workflows grouped by requestor category (Faculty / Student / Staff).
   const matrix = [
-    ['Leave Application', 'Employee application for leave of absence', 'Faculty / Employee',
+    // Faculty
+    ['Leave Application', 'Employee application for leave of absence', 'Faculty',
       [['supervisor', 'Immediate Supervisor'], ['dept_head', 'Department Head'], ['hr_office', 'HRMO']]],
-    ['Travel Authority', 'Request to travel on official business', 'Faculty / Employee',
+    ['Travel Authority', 'Request to travel on official business', 'Faculty',
       [['supervisor', 'Immediate Supervisor'], ['dept_head', 'Department Head'], ['dean', 'College Dean']]],
-    ['Purchase Requisition', 'Request to procure goods or services', 'Faculty / Employee',
+    ['Purchase Requisition', 'Request to procure goods or services', 'Faculty',
       [['dept_head', 'Department Head'], ['budget_office', 'Budget Office'], ['dean', 'College Dean']]],
+    // Student
     ['Excuse Letter', 'Student excuse for absence', 'Student',
       [['instructor', 'Subject Instructor'], ['dept_head', 'Department Head']]],
     ['Certification / Clearance', 'Student request for certification or clearance', 'Student',
       [['registrar', 'Registrar Staff'], ['dept_head', 'Registrar Head']]],
+    // Staff
+    ['Staff Leave Application', 'Non-teaching staff leave of absence', 'Staff',
+      [['supervisor', 'Immediate Supervisor'], ['hr_office', 'HRMO']]],
+    ['Service / Maintenance Request', 'Request for facility service or maintenance', 'Staff',
+      [['supervisor', 'Immediate Supervisor'], ['gso', 'General Services Office']]],
+    ['Supplies Requisition', 'Staff request for office supplies', 'Staff',
+      [['supervisor', 'Immediate Supervisor'], ['budget_office', 'Budget Office']]],
   ];
   for (const [type, desc, group, steps] of matrix) {
     const r = await pool.query(
@@ -145,4 +179,4 @@ async function seed() {
   console.log('Seed complete. Demo logins use password: password123');
 }
 
-module.exports = { pool, init };
+module.exports = { pool, init, seedSignature };

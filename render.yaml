@@ -12,11 +12,26 @@ services:
       - key: JWT_SECRET
         generateValue: true
       - key: CLIENT_ORIGIN
-        sync: false          # set this to your Netlify site URL after the front-end is deployed
+        sync: false          # your Netlify site URL (for CORS), e.g. https://your-site.netlify.app
+      - key: CLIENT_URL
+        sync: false          # same Netlify URL (used to build the email verification link)
       - key: DATABASE_URL
         fromDatabase:
           name: wams-db
           property: connectionString
+      # ----- Email (set these values in the Render dashboard; never commit them) -----
+      - key: SMTP_HOST
+        sync: false
+      - key: SMTP_PORT
+        sync: false
+      - key: SMTP_SECURE
+        sync: false
+      - key: SMTP_USER
+        sync: false
+      - key: SMTP_PASS
+        sync: false
+      - key: SMTP_FROM
+        sync: false
 
 databases:
   - name: wams-db

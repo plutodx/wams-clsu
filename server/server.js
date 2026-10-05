@@ -1,13 +1,20 @@
 // server.js - Express REST API for WAMS (PostgreSQL).
+require('dotenv').config(); // load .env (SMTP settings, DB, etc.) before anything reads process.env
 const express = require('express');
 const cors = require('cors');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
+const crypto = require('crypto');
 const { pool, init } = require('./db');
+const { sendVerificationEmail } = require('./mail');
 
 const app = express();
+app.set('trust proxy', true); // resolve real client IP behind the Vite dev proxy
 const PORT = process.env.PORT || 4000;
 const JWT_SECRET = process.env.JWT_SECRET || 'wams-dev-secret-change-me';
+// Where the front-end runs, used to build the email verification link.
+const CLIENT_URL = process.env.CLIENT_URL || 'http://localhost:5173';
+const REQUESTOR_CATEGORIES = ['Student', 'Faculty', 'Staff'];
 
 // CORS: allow the deployed front-end origin (set CLIENT_ORIGIN in production), or all in dev.
 const CLIENT_ORIGIN = process.env.CLIENT_ORIGIN || '*';
@@ -28,7 +35,7 @@ async function auth(req, res, next) {
   if (!token) return res.status(401).json({ error: 'Not authenticated' });
   try {
     const payload = jwt.verify(token, JWT_SECRET);
-    req.user = await one('SELECT id,name,email,role,approver_role,office FROM users WHERE id=$1', [payload.id]);
+    req.user = await one('SELECT id,name,email,role,approver_role,office,category,signature,email_verified FROM users WHERE id=$1', [payload.id]);
     if (!req.user) return res.status(401).json({ error: 'User not found' });
     next();
   } catch {
@@ -38,10 +45,20 @@ async function auth(req, res, next) {
 const requireRole = (...roles) => (req, res, next) =>
   roles.includes(req.user.role) ? next() : res.status(403).json({ error: 'Forbidden' });
 
-async function logAudit(request_id, actor, action, detail) {
+// Pulls a readable client IP from the request (works behind the Vite dev proxy too).
+function clientIp(req) {
+  if (!req) return null;
+  const fwd = req.headers && req.headers['x-forwarded-for'];
+  let ip = (fwd ? String(fwd).split(',')[0].trim() : '') || req.ip || (req.socket && req.socket.remoteAddress) || '';
+  if (ip === '::1' || ip === '::ffff:127.0.0.1') ip = '127.0.0.1';
+  if (ip.startsWith('::ffff:')) ip = ip.slice(7);
+  return ip || null;
+}
+
+async function logAudit(request_id, actor, action, detail, ip = null, data = null) {
   await pool.query(
-    'INSERT INTO audit_logs (request_id, actor_id, actor_name, action, detail) VALUES ($1,$2,$3,$4,$5)',
-    [request_id, actor ? actor.id : null, actor ? actor.name : 'System', action, detail || '']
+    'INSERT INTO audit_logs (request_id, actor_id, actor_name, action, detail, ip_address, data) VALUES ($1,$2,$3,$4,$5,$6,$7)',
+    [request_id, actor ? actor.id : null, actor ? actor.name : 'System', action, detail || '', ip, data ? JSON.stringify(data) : null]
   );
 }
 async function notify(user_id, request_id, message) {
@@ -65,15 +82,55 @@ const wrap = (fn) => (req, res) => fn(req, res).catch((e) => {
 
 // ---------- auth ----------
 app.post('/api/auth/register', wrap(async (req, res) => {
-  const { name, email, password, role = 'requestor', office = '' } = req.body || {};
+  const { name, email, password, role = 'requestor', office = '', category = '' } = req.body || {};
   if (!name || !email || !password) return res.status(400).json({ error: 'Missing fields' });
-  if (await one('SELECT id FROM users WHERE email=$1', [email])) return res.status(409).json({ error: 'Email already registered' });
   const finalRole = ['requestor', 'staff'].includes(role) ? role : 'requestor';
-  const r = await one(
-    'INSERT INTO users (name,email,password_hash,role,office) VALUES ($1,$2,$3,$4,$5) RETURNING id,name,email,role,approver_role,office',
-    [name, email, bcrypt.hashSync(password, 10), finalRole, office]
+  // Requestors must choose a category (Student / Faculty / Staff).
+  const finalCategory = finalRole === 'requestor'
+    ? (REQUESTOR_CATEGORIES.includes(category) ? category : null)
+    : null;
+  if (finalRole === 'requestor' && !finalCategory)
+    return res.status(400).json({ error: 'Please choose a requestor category (Student, Faculty, or Staff)' });
+  if (await one('SELECT id FROM users WHERE email=$1', [email])) return res.status(409).json({ error: 'Email already registered' });
+
+  const token = crypto.randomBytes(24).toString('hex');
+  const expires = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
+  await one(
+    `INSERT INTO users (name,email,password_hash,role,office,category,email_verified,verify_token,verify_expires)
+     VALUES ($1,$2,$3,$4,$5,$6,0,$7,$8) RETURNING id`,
+    [name, email, bcrypt.hashSync(password, 10), finalRole, office, finalCategory, token, expires]
   );
-  res.json({ token: sign(r), user: r });
+  const verifyUrl = `${CLIENT_URL}/verify?token=${token}`;
+  const mail = await sendVerificationEmail(email, name, verifyUrl);
+  // Do NOT log the user in yet - they must verify their email first.
+  res.json({ ok: true, verificationRequired: true,
+    message: 'Account created. Check your email for a verification link before signing in.',
+    mailDelivered: Boolean(mail && mail.sent),
+    mailPreviewUrl: (mail && mail.previewUrl) || null,
+    mailError: (mail && mail.error) || null });
+}));
+
+app.get('/api/auth/verify', wrap(async (req, res) => {
+  const { token } = req.query || {};
+  if (!token) return res.status(400).json({ error: 'Missing token' });
+  const u = await one('SELECT * FROM users WHERE verify_token=$1', [token]);
+  if (!u) return res.status(400).json({ error: 'Invalid or already-used verification link' });
+  if (u.verify_expires && new Date(u.verify_expires) < new Date())
+    return res.status(400).json({ error: 'Verification link expired. Please request a new one.' });
+  await pool.query('UPDATE users SET email_verified=1, verify_token=NULL, verify_expires=NULL WHERE id=$1', [u.id]);
+  res.json({ ok: true, message: 'Email verified. You can now sign in.' });
+}));
+
+app.post('/api/auth/resend', wrap(async (req, res) => {
+  const { email } = req.body || {};
+  const u = await one('SELECT * FROM users WHERE email=$1', [email]);
+  if (!u) return res.json({ ok: true }); // do not reveal whether the email exists
+  if (u.email_verified) return res.json({ ok: true, alreadyVerified: true });
+  const token = crypto.randomBytes(24).toString('hex');
+  const expires = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
+  await pool.query('UPDATE users SET verify_token=$1, verify_expires=$2 WHERE id=$3', [token, expires, u.id]);
+  await sendVerificationEmail(u.email, u.name, `${CLIENT_URL}/verify?token=${token}`);
+  res.json({ ok: true });
 }));
 
 app.post('/api/auth/login', wrap(async (req, res) => {
@@ -81,15 +138,52 @@ app.post('/api/auth/login', wrap(async (req, res) => {
   const row = await one('SELECT * FROM users WHERE email=$1', [email]);
   if (!row || !bcrypt.compareSync(password, row.password_hash))
     return res.status(401).json({ error: 'Invalid email or password' });
-  const user = { id: row.id, name: row.name, email: row.email, role: row.role, approver_role: row.approver_role, office: row.office };
+  if (!row.email_verified)
+    return res.status(403).json({ error: 'Please verify your email before signing in.', needsVerification: true });
+  const user = { id: row.id, name: row.name, email: row.email, role: row.role, approver_role: row.approver_role, office: row.office, category: row.category };
+  await logAudit(null, user, 'auth.login', 'User Login', clientIp(req));
   res.json({ token: sign(user), user });
 }));
 
-app.get('/api/auth/me', auth, (req, res) => res.json({ user: req.user }));
+// JWT is stateless, so logout just records the event for the audit trail.
+app.post('/api/auth/logout', auth, wrap(async (req, res) => {
+  await logAudit(null, req.user, 'auth.logout', 'User Logout', clientIp(req));
+  res.json({ ok: true });
+}));
+
+// current user profile (adds has_signature flag; never returns the password hash)
+app.get('/api/auth/me', auth, (req, res) => {
+  const { signature, ...rest } = req.user;
+  res.json({ user: { ...rest, has_signature: Boolean(signature), signature: signature || null } });
+});
+
+// Set or update the approver's signature. The signature is drawn once or uploaded
+// as a transparent PNG, then applied automatically on every approval (fixed on
+// each request). Approvers may re-draw or re-upload to update it later.
+app.post('/api/me/signature', auth, requireRole('approver'), wrap(async (req, res) => {
+  const { signature } = req.body || {};
+  // Accept a PNG (drawn on canvas or uploaded) or the seeded SVG signatures.
+  const ok = typeof signature === 'string' &&
+    (signature.startsWith('data:image/png') || signature.startsWith('data:image/svg+xml'));
+  if (!ok) return res.status(400).json({ error: 'A PNG signature image is required' });
+
+  const isUpdate = Boolean(req.user.signature);
+  await pool.query('UPDATE users SET signature=$1 WHERE id=$2', [signature, req.user.id]);
+  await logAudit(null, req.user, isUpdate ? 'signature.update' : 'signature.set',
+    isUpdate ? 'Updated Signature' : 'Set Signature', clientIp(req));
+  res.json({ ok: true, updated: isUpdate });
+}));
 
 // ---------- workflows ----------
 app.get('/api/workflows', auth, wrap(async (req, res) => {
-  const wfs = await q('SELECT * FROM workflows WHERE active=1 ORDER BY doc_type');
+  // Requestors only see the workflows for their category (Student / Faculty / Staff).
+  // Admins and staff see every workflow.
+  let wfs;
+  if (req.user.role === 'requestor' && req.user.category) {
+    wfs = await q('SELECT * FROM workflows WHERE active=1 AND originating_group=$1 ORDER BY doc_type', [req.user.category]);
+  } else {
+    wfs = await q('SELECT * FROM workflows WHERE active=1 ORDER BY doc_type');
+  }
   for (const w of wfs) {
     w.steps = await q('SELECT step_order, approver_role, label FROM workflow_steps WHERE workflow_id=$1 ORDER BY step_order', [w.id]);
   }
@@ -104,7 +198,8 @@ app.post('/api/workflows', auth, requireRole('admin'), wrap(async (req, res) => 
     [doc_type, description, originating_group]);
   let i = 1;
   for (const s of steps) await pool.query('INSERT INTO workflow_steps (workflow_id,step_order,approver_role,label) VALUES ($1,$2,$3,$4)', [wf.id, i++, s.approver_role, s.label]);
-  await logAudit(null, req.user, 'CONFIGURE_WORKFLOW', `Created workflow "${doc_type}"`);
+  await logAudit(null, req.user, 'workflow.create', `Created workflow "${doc_type}"`, clientIp(req),
+    { doc_type, description, originating_group, steps });
   res.json({ id: wf.id });
 }));
 
@@ -125,16 +220,17 @@ app.post('/api/requests', auth, wrap(async (req, res) => {
 
   const reference = await refNo();
   const r = await one(
-    `INSERT INTO requests (reference_no,requestor_id,workflow_id,doc_type,title,details,status,current_step)
-     VALUES ($1,$2,$3,$4,$5,$6,'In Progress',1) RETURNING id`,
-    [reference, req.user.id, workflow ? workflow.id : null, doc_type, title, details]
+    `INSERT INTO requests (reference_no,requestor_id,requestor_category,workflow_id,doc_type,title,details,status,current_step)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,'In Progress',1) RETURNING id`,
+    [reference, req.user.id, req.user.category || null, workflow ? workflow.id : null, doc_type, title, details]
   );
   const reqId = r.id;
   for (const s of steps) {
     await pool.query('INSERT INTO request_steps (request_id,step_order,approver_role,label,status) VALUES ($1,$2,$3,$4,$5)',
       [reqId, s.step_order, s.approver_role, s.label, s.step_order === 1 ? 'Pending' : 'Waiting']);
   }
-  await logAudit(reqId, req.user, 'SUBMIT', `Submitted ${doc_type} (${reference})`);
+  await logAudit(reqId, req.user, 'request.submit', `Submitted ${doc_type} (${reference})`, clientIp(req),
+    { reference_no: reference, doc_type, title, details, category: req.user.category || null });
   await notifyRole(steps[0].approver_role, reqId, `New ${doc_type} (${reference}) awaiting your approval`);
   res.json({ id: reqId, reference_no: reference });
 }));
@@ -173,7 +269,7 @@ app.get('/api/requests/:id', auth, wrap(async (req, res) => {
 }));
 
 app.post('/api/requests/:id/act', auth, requireRole('approver'), wrap(async (req, res) => {
-  const { action, comment = '', signature = '' } = req.body || {};
+  const { action, comment = '' } = req.body || {};
   if (!['approve', 'reject', 'return'].includes(action)) return res.status(400).json({ error: 'Invalid action' });
 
   const r = await one('SELECT * FROM requests WHERE id=$1', [req.params.id]);
@@ -181,14 +277,18 @@ app.post('/api/requests/:id/act', auth, requireRole('approver'), wrap(async (req
   const step = await one('SELECT * FROM request_steps WHERE request_id=$1 AND step_order=$2', [r.id, r.current_step]);
   if (!step || step.status !== 'Pending') return res.status(400).json({ error: 'No pending step to act on' });
   if (step.approver_role !== req.user.approver_role) return res.status(403).json({ error: 'This step is not assigned to your role' });
-  if (action === 'approve' && !signature) return res.status(400).json({ error: 'Digital signature required to approve' });
+  // Fixed signature: the approver's saved signature is applied automatically on approval.
+  const signature = req.user.signature || '';
+  if (action === 'approve' && !signature)
+    return res.status(400).json({ error: 'Set your signature first (Account > Signature) before approving' });
 
   const total = (await one('SELECT COUNT(*)::int AS c FROM request_steps WHERE request_id=$1', [r.id])).c;
 
   if (action === 'approve') {
     await pool.query('UPDATE request_steps SET status=$1, acted_by=$2, comment=$3, signature=$4, acted_at=NOW() WHERE id=$5',
       ['Approved', req.user.id, comment, signature, step.id]);
-    await logAudit(r.id, req.user, 'APPROVE', `Approved step ${step.step_order} (${step.label})`);
+    await logAudit(r.id, req.user, 'request.approve', `Approved step ${step.step_order} (${step.label})`, clientIp(req),
+      { reference_no: r.reference_no, step: step.label, comment });
     if (step.step_order < total) {
       const next = step.step_order + 1;
       await pool.query('UPDATE request_steps SET status=$1 WHERE request_id=$2 AND step_order=$3', ['Pending', r.id, next]);
@@ -204,7 +304,8 @@ app.post('/api/requests/:id/act', auth, requireRole('approver'), wrap(async (req
     await pool.query('UPDATE request_steps SET status=$1, acted_by=$2, comment=$3, acted_at=NOW() WHERE id=$4',
       [status, req.user.id, comment, step.id]);
     await pool.query('UPDATE requests SET status=$1, updated_at=NOW() WHERE id=$2', [status, r.id]);
-    await logAudit(r.id, req.user, action.toUpperCase(), `${status} at step ${step.step_order}: ${comment}`);
+    await logAudit(r.id, req.user, `request.${action}`, `${status} at step ${step.step_order}: ${comment}`, clientIp(req),
+      { reference_no: r.reference_no, step: step.label, comment });
     await notify(r.requestor_id, r.id, `Your ${r.doc_type} (${r.reference_no}) was ${status.toLowerCase()}`);
   }
   res.json({ ok: true });
@@ -220,7 +321,8 @@ app.post('/api/requests/:id/resubmit', auth, wrap(async (req, res) => {
     [title ?? null, details ?? null, r.id]);
   await pool.query("UPDATE request_steps SET status=CASE WHEN step_order=1 THEN 'Pending' ELSE 'Waiting' END, acted_by=NULL, comment=NULL, signature=NULL, acted_at=NULL WHERE request_id=$1", [r.id]);
   const first = await one('SELECT * FROM request_steps WHERE request_id=$1 AND step_order=1', [r.id]);
-  await logAudit(r.id, req.user, 'RESUBMIT', 'Requestor resubmitted after revision');
+  await logAudit(r.id, req.user, 'request.resubmit', 'Requestor resubmitted after revision', clientIp(req),
+    { reference_no: r.reference_no });
   await notifyRole(first.approver_role, r.id, `${r.doc_type} (${r.reference_no}) resubmitted for approval`);
   res.json({ ok: true });
 }));
@@ -229,10 +331,11 @@ app.post('/api/requests/:id/resubmit', auth, wrap(async (req, res) => {
 app.get('/api/reports/summary', auth, requireRole('admin', 'staff'), wrap(async (req, res) => {
   const byStatus = await q('SELECT status, COUNT(*)::int AS count FROM requests GROUP BY status');
   const byType = await q('SELECT doc_type, COUNT(*)::int AS count FROM requests GROUP BY doc_type ORDER BY count DESC');
+  const byCategory = await q("SELECT COALESCE(requestor_category,'Unspecified') AS category, COUNT(*)::int AS count FROM requests GROUP BY requestor_category ORDER BY count DESC");
   const total = (await one('SELECT COUNT(*)::int AS c FROM requests')).c;
   const pending = (await one("SELECT COUNT(*)::int AS c FROM requests WHERE status IN ('Pending','In Progress')")).c;
   const approved = (await one("SELECT COUNT(*)::int AS c FROM requests WHERE status='Approved'")).c;
-  res.json({ total, pending, approved, byStatus, byType });
+  res.json({ total, pending, approved, byStatus, byType, byCategory });
 }));
 
 // ---------- audit ----------
@@ -250,14 +353,16 @@ app.post('/api/users', auth, requireRole('admin'), wrap(async (req, res) => {
   if (await one('SELECT id FROM users WHERE email=$1', [email])) return res.status(409).json({ error: 'Email exists' });
   const u = await one('INSERT INTO users (name,email,password_hash,role,approver_role,office) VALUES ($1,$2,$3,$4,$5,$6) RETURNING id',
     [name, email, bcrypt.hashSync(password, 10), role, approver_role, office]);
-  await logAudit(null, req.user, 'CREATE_USER', `Created ${role} ${email}`);
+  await logAudit(null, req.user, 'user.create', `Created ${role} ${email}`, clientIp(req),
+    { id: u.id, name, email, role, approver_role, office });
   res.json({ id: u.id });
 }));
 app.patch('/api/users/:id', auth, requireRole('admin'), wrap(async (req, res) => {
   const { role, approver_role } = req.body || {};
   await pool.query('UPDATE users SET role=COALESCE($1,role), approver_role=$2 WHERE id=$3',
     [role ?? null, approver_role ?? null, req.params.id]);
-  await logAudit(null, req.user, 'UPDATE_USER', `Updated user ${req.params.id}`);
+  await logAudit(null, req.user, 'user.update', `Updated user ${req.params.id}`, clientIp(req),
+    { id: Number(req.params.id), role, approver_role });
   res.json({ ok: true });
 }));
 

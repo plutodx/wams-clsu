@@ -1,9 +1,8 @@
-import { useEffect, useRef, useState } from 'react'
-import { useParams } from 'react-router-dom'
+import { useEffect, useState } from 'react'
+import { Link, useParams } from 'react-router-dom'
 import { api } from '../api.js'
 import { useAuth } from '../auth.jsx'
 import { StatusBadge } from '../App.jsx'
-import SignaturePad from '../components/SignaturePad.jsx'
 
 function fmt(d) {
   if (!d) return ''
@@ -19,7 +18,6 @@ export default function RequestDetail() {
   const [err, setErr] = useState('')
   const [comment, setComment] = useState('')
   const [busy, setBusy] = useState(false)
-  const sigRef = useRef(null)
 
   const load = () => api(`/api/requests/${id}`).then(setR).catch((e) => setErr(e.message))
   useEffect(() => { load() }, [id])
@@ -31,17 +29,14 @@ export default function RequestDetail() {
   const canAct = user.role === 'approver' && r.status === 'In Progress' &&
     currentStep && currentStep.status === 'Pending' && currentStep.approver_role === user.approver_role
   const canResubmit = user.role === 'requestor' && r.requestor_id === user.id && r.status === 'Returned'
+  const hasSignature = Boolean(user.signature)
 
+  // Fixed signature: the approver's saved signature is applied by the server on approval.
   const act = async (action) => {
     setErr(''); setBusy(true)
     try {
-      let signature = ''
-      if (action === 'approve') {
-        if (sigRef.current.isEmpty()) { setErr('Please sign before approving.'); setBusy(false); return }
-        signature = sigRef.current.toDataURL()
-      }
-      await api(`/api/requests/${id}/act`, { method: 'POST', body: { action, comment, signature } })
-      setComment(''); if (sigRef.current) sigRef.current.clear(); await load()
+      await api(`/api/requests/${id}/act`, { method: 'POST', body: { action, comment } })
+      setComment(''); await load()
     } catch (e) { setErr(e.message) } finally { setBusy(false) }
   }
 
@@ -69,6 +64,7 @@ export default function RequestDetail() {
           <table style={{ marginTop: 8 }}>
             <tbody>
               <tr><th>Requestor</th><td>{r.requestor_name} ({r.requestor_office})</td></tr>
+              {r.requestor_category && <tr><th>Category</th><td>{r.requestor_category}</td></tr>}
               <tr><th>Document type</th><td>{r.doc_type}</td></tr>
               <tr><th>Submitted</th><td>{fmt(r.created_at)}</td></tr>
               <tr><th>Last update</th><td>{fmt(r.updated_at)}</td></tr>
@@ -98,11 +94,27 @@ export default function RequestDetail() {
           <strong>Your action &mdash; {currentStep.label}</strong>
           <label>Comment (optional for approve, recommended for reject/return)</label>
           <textarea value={comment} onChange={(e) => setComment(e.target.value)} />
-          <label>Digital signature (required to approve)</label>
-          <SignaturePad ref={sigRef} />
+
+          {hasSignature ? (
+            <div style={{ marginTop: 12 }}>
+              <label>Signature applied on approval</label>
+              <div className="sig-box">
+                <img src={user.signature} alt="Your fixed signature" style={{ maxHeight: 70, maxWidth: '100%' }} />
+              </div>
+              <p className="small muted" style={{ marginTop: 6 }}>
+                Your fixed signature is attached automatically when you approve. No need to sign again.
+              </p>
+            </div>
+          ) : (
+            <div className="notice" style={{ marginTop: 12 }}>
+              You need to set your signature once before you can approve.
+              {' '}<Link to="/account">Set it in My Account</Link>.
+            </div>
+          )}
+
           {err && <div className="err">{err}</div>}
           <div className="row-actions" style={{ marginTop: 14 }}>
-            <button disabled={busy} onClick={() => act('approve')}>Approve &amp; Sign</button>
+            <button disabled={busy || !hasSignature} onClick={() => act('approve')}>Approve &amp; Sign</button>
             <button disabled={busy} className="warn" onClick={() => act('return')}>Return for revision</button>
             <button disabled={busy} className="danger" onClick={() => act('reject')}>Reject</button>
           </div>

@@ -3,6 +3,7 @@ import { Link } from 'react-router-dom'
 import { api } from '../api.js'
 import { useAuth } from '../auth.jsx'
 import { StatusBadge } from '../App.jsx'
+import PieChart from '../components/PieChart.jsx'
 
 export default function Dashboard() {
   const { user } = useAuth()
@@ -93,6 +94,13 @@ function AdminDash() {
           <div className="card stat"><div className="num">{sum.approved}</div><div className="lbl">Approved</div></div>
         </div>
       )}
+      {sum && (
+        <div className="grid cols-2" style={{ marginBottom: 20 }}>
+          <PieChart title="Requests by category" data={sum.byCategory} labelKey="category" />
+          <PieChart title="Requests by status" data={sum.byStatus} labelKey="status" />
+          <BarChart title="Requests by document type" data={sum.byType} labelKey="doc_type" color="#c08a2d" />
+        </div>
+      )}
       <div className="card">
         <strong>Recent activity</strong>
         <table style={{ marginTop: 8 }}>
@@ -108,6 +116,40 @@ function AdminDash() {
           </tbody>
         </table>
       </div>
+    </div>
+  )
+}
+
+// Lightweight inline-SVG bar chart. No chart library needed, so the graph works
+// offline and in the standalone demo build.
+function BarChart({ title, data, labelKey, color = '#0e7a3b' }) {
+  const items = (data || []).filter((d) => d && d[labelKey] != null)
+  const max = Math.max(1, ...items.map((d) => d.count))
+  const barH = 26, gap = 14, padL = 150, padR = 46, top = 8
+  const height = items.length ? items.length * (barH + gap) + top : 60
+  const width = 560, plot = width - padL - padR
+  return (
+    <div className="card chart-card">
+      <strong>{title}</strong>
+      {items.length === 0 ? (
+        <p className="muted" style={{ marginTop: 8 }}>No data yet.</p>
+      ) : (
+        <svg className="barchart" viewBox={`0 0 ${width} ${height}`} role="img" aria-label={title}>
+          {items.map((d, i) => {
+            const y = top + i * (barH + gap)
+            const w = Math.max(2, (d.count / max) * plot)
+            return (
+              <g key={i}>
+                <text x={padL - 10} y={y + barH / 2} textAnchor="end" dominantBaseline="middle"
+                  fontSize="13" fill="#42524a">{String(d[labelKey])}</text>
+                <rect x={padL} y={y} width={w} height={barH} rx="5" fill={color} />
+                <text x={padL + w + 8} y={y + barH / 2} dominantBaseline="middle"
+                  fontSize="13" fontWeight="700" fill="#1f2a24">{d.count}</text>
+              </g>
+            )
+          })}
+        </svg>
+      )}
     </div>
   )
 }

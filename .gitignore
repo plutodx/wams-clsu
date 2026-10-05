@@ -12,3 +12,8 @@ server/data.db-*
 # os / editor
 .DS_Store
 .vscode/
+
+# secrets / local env
+.env
+server/.env
+client/.env
