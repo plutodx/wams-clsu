@@ -18,7 +18,15 @@ export function AuthProvider({ children }) {
 
   const login = async (email, password) => {
     const d = await api('/api/auth/login', { method: 'POST', body: { email, password } })
-    setToken(d.token); setUser(d.user); return d.user
+    setToken(d.token)
+    // The login response omits the signature; load the full profile (which includes it)
+    // so approvers see their saved signature right away, even without a page refresh.
+    try {
+      const me = await api('/api/auth/me')
+      setUser(me.user); return me.user
+    } catch {
+      setUser(d.user); return d.user
+    }
   }
   // Registration no longer signs the user in. It creates an unverified account and
   // triggers a verification email; the user signs in only after verifying.

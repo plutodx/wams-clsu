@@ -6,7 +6,7 @@ const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const crypto = require('crypto');
 const { pool, init } = require('./db');
-const { sendVerificationEmail } = require('./mail');
+const { sendVerificationEmail, sendNotificationEmail, sendPasswordResetEmail } = require('./mail');
 
 const app = express();
 app.set('trust proxy', true); // resolve real client IP behind the Vite dev proxy
@@ -64,6 +64,11 @@ async function logAudit(request_id, actor, action, detail, ip = null, data = nul
 async function notify(user_id, request_id, message) {
   await pool.query('INSERT INTO notifications (user_id, request_id, message) VALUES ($1,$2,$3)',
     [user_id, request_id, message]);
+  // Also email the person so they are notified in Gmail, not just the in-app bell.
+  const u = await one('SELECT email FROM users WHERE id=$1', [user_id]);
+  if (u && u.email) {
+    sendNotificationEmail(u.email, `WAMS: ${message}`, message, CLIENT_URL).catch(() => {});
+  }
 }
 async function notifyRole(approver_role, request_id, message) {
   const rows = await q('SELECT id FROM users WHERE role=$1 AND approver_role=$2', ['approver', approver_role]);
@@ -131,6 +136,45 @@ app.post('/api/auth/resend', wrap(async (req, res) => {
   await pool.query('UPDATE users SET verify_token=$1, verify_expires=$2 WHERE id=$3', [token, expires, u.id]);
   await sendVerificationEmail(u.email, u.name, `${CLIENT_URL}/verify?token=${token}`);
   res.json({ ok: true });
+}));
+
+// Request a password reset link. Always responds ok so the form never reveals
+// whether an email is registered.
+app.post('/api/auth/forgot', wrap(async (req, res) => {
+  const { email } = req.body || {};
+  if (!email) return res.status(400).json({ error: 'Email is required' });
+  const u = await one('SELECT * FROM users WHERE email=$1', [email]);
+  if (!u) return res.json({ ok: true, message: 'If an account exists for that email, a reset link has been sent.' });
+
+  const token = crypto.randomBytes(24).toString('hex');
+  const expires = new Date(Date.now() + 60 * 60 * 1000).toISOString(); // 1 hour
+  await pool.query('UPDATE users SET reset_token=$1, reset_expires=$2 WHERE id=$3', [token, expires, u.id]);
+  const resetUrl = `${CLIENT_URL}/reset?token=${token}`;
+  const mail = await sendPasswordResetEmail(u.email, u.name, resetUrl);
+  await logAudit(null, { id: u.id, name: u.name }, 'auth.forgot', 'Requested password reset', clientIp(req));
+  res.json({
+    ok: true,
+    message: 'If an account exists for that email, a reset link has been sent.',
+    mailDelivered: Boolean(mail && mail.sent),
+    mailPreviewUrl: (mail && mail.previewUrl) || null,
+    // Only surfaced when email could not be delivered (e.g. console-only dev mode), so you can still test.
+    demoResetUrl: (mail && mail.sent) ? null : `/reset?token=${token}`,
+  });
+}));
+
+// Complete a password reset with the emailed token and a new password.
+app.post('/api/auth/reset', wrap(async (req, res) => {
+  const { token, password } = req.body || {};
+  if (!token || !password) return res.status(400).json({ error: 'Token and new password are required' });
+  if (String(password).length < 6) return res.status(400).json({ error: 'Password must be at least 6 characters' });
+  const u = await one('SELECT * FROM users WHERE reset_token=$1', [token]);
+  if (!u) return res.status(400).json({ error: 'Invalid or already-used reset link' });
+  if (u.reset_expires && new Date(u.reset_expires) < new Date())
+    return res.status(400).json({ error: 'Reset link expired. Please request a new one.' });
+  await pool.query('UPDATE users SET password_hash=$1, reset_token=NULL, reset_expires=NULL WHERE id=$2',
+    [bcrypt.hashSync(password, 10), u.id]);
+  await logAudit(null, { id: u.id, name: u.name }, 'auth.reset', 'Password reset completed', clientIp(req));
+  res.json({ ok: true, message: 'Your password has been reset. You can now sign in.' });
 }));
 
 app.post('/api/auth/login', wrap(async (req, res) => {
@@ -351,7 +395,9 @@ app.post('/api/users', auth, requireRole('admin'), wrap(async (req, res) => {
   const { name, email, password, role, approver_role = null, office = '' } = req.body || {};
   if (!name || !email || !password || !role) return res.status(400).json({ error: 'Missing fields' });
   if (await one('SELECT id FROM users WHERE email=$1', [email])) return res.status(409).json({ error: 'Email exists' });
-  const u = await one('INSERT INTO users (name,email,password_hash,role,approver_role,office) VALUES ($1,$2,$3,$4,$5,$6) RETURNING id',
+  // Admin-created accounts are trusted: mark them verified so they can sign in right away
+  // (no email verification step for users the admin adds directly).
+  const u = await one('INSERT INTO users (name,email,password_hash,role,approver_role,office,email_verified) VALUES ($1,$2,$3,$4,$5,$6,1) RETURNING id',
     [name, email, bcrypt.hashSync(password, 10), role, approver_role, office]);
   await logAudit(null, req.user, 'user.create', `Created ${role} ${email}`, clientIp(req),
     { id: u.id, name, email, role, approver_role, office });

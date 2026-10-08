@@ -27,6 +27,9 @@ export default function Register() {
           <p className="page-sub">One more step before you can sign in.</p>
           <div className="notice">
             {done.message || `We sent a verification link to ${done.email}. Open it to activate your account.`}
+            <div style={{ marginTop: 8 }}>
+              If it is not in your inbox within a minute, please check your spam or junk folder.
+            </div>
           </div>
           {done.previewUrl && (
             <a href={done.previewUrl} target="_blank" rel="noopener noreferrer">

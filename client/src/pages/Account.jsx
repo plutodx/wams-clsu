@@ -1,4 +1,4 @@
-import { useRef, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { api } from '../api.js'
 import { useAuth } from '../auth.jsx'
 import SignaturePad from '../components/SignaturePad.jsx'
@@ -43,6 +43,10 @@ export default function Account() {
   const [err, setErr] = useState('')
   const [busy, setBusy] = useState(false)
   const [saved, setSaved] = useState(false)
+
+  // Always pull the latest profile (including the saved signature) when opening this page,
+  // so it shows correctly even right after a fresh login.
+  useEffect(() => { refreshUser().catch(() => {}) }, [])
 
   const hasSig = Boolean(user.signature)
 

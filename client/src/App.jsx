@@ -6,6 +6,7 @@ import Login from './pages/Login.jsx'
 import Register from './pages/Register.jsx'
 import Verify from './pages/Verify.jsx'
 import ForgotPassword from './pages/ForgotPassword.jsx'
+import Reset from './pages/Reset.jsx'
 import Dashboard from './pages/Dashboard.jsx'
 import SubmitRequest from './pages/SubmitRequest.jsx'
 import RequestDetail from './pages/RequestDetail.jsx'
@@ -64,6 +65,7 @@ export default function App() {
         <Route path="/register" element={<Register />} />
         <Route path="/verify" element={<Verify />} />
         <Route path="/forgot" element={<ForgotPassword />} />
+        <Route path="/reset" element={<Reset />} />
         <Route path="/" element={<ProtectedRoute><Dashboard /></ProtectedRoute>} />
         <Route path="/submit" element={<ProtectedRoute roles={['requestor']}><SubmitRequest /></ProtectedRoute>} />
         <Route path="/requests/:id" element={<ProtectedRoute><RequestDetail /></ProtectedRoute>} />

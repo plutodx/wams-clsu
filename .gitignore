@@ -17,3 +17,6 @@ server/data.db-*
 .env
 server/.env
 client/.env
+
+# throwaway test scripts
+server/_*.js

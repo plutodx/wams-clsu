@@ -7,11 +7,15 @@ const bcrypt = require('bcryptjs');
 let pool;
 if (process.env.DATABASE_URL) {
   const { Pool } = require('pg');
+  const cs = process.env.DATABASE_URL;
+  // Managed Postgres over the public internet (Neon, Render, etc.) requires SSL.
+  // Railway's internal network host and localhost do NOT support SSL, so disable it there.
+  const noSsl = /railway\.internal|localhost|127\.0\.0\.1/.test(cs);
   pool = new Pool({
-    connectionString: process.env.DATABASE_URL,
-    ssl: { rejectUnauthorized: false }, // required by most hosted Postgres (Render, etc.)
+    connectionString: cs,
+    ssl: noSsl ? false : { rejectUnauthorized: false },
   });
-  console.log('Using PostgreSQL from DATABASE_URL');
+  console.log(`Using PostgreSQL from DATABASE_URL (ssl: ${noSsl ? 'off' : 'on'})`);
 } else {
   const { newDb } = require('pg-mem');
   const mem = newDb();
@@ -45,6 +49,8 @@ async function init() {
       email_verified INTEGER DEFAULT 0,
       verify_token TEXT,
       verify_expires TIMESTAMPTZ,
+      reset_token TEXT,
+      reset_expires TIMESTAMPTZ,
       created_at TIMESTAMPTZ DEFAULT NOW()
     );
     CREATE TABLE IF NOT EXISTS workflows (
@@ -107,6 +113,11 @@ async function init() {
       created_at TIMESTAMPTZ DEFAULT NOW()
     );
   `);
+  // For databases created before password-reset was added, add the columns if missing.
+  // (New in-memory DBs already have them from the CREATE TABLE above.)
+  for (const col of ['reset_token TEXT', 'reset_expires TIMESTAMPTZ']) {
+    try { await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS ${col}`); } catch { /* older engine: ignore */ }
+  }
   await seed();
 }
 
