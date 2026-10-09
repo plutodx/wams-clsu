@@ -261,6 +261,17 @@ export async function mockApi(path, { method = 'GET', body } = {}) {
     if (u) { if (body.role) u.role = body.role; u.approver_role = body.approver_role || null; save(db) }
     return { ok: true }
   }
+  if (seg[1] === 'users' && seg[2] && method === 'DELETE') {
+    const id = Number(seg[2])
+    if (id === me.id) err('You cannot delete your own account.')
+    const u = db.users.find((x) => x.id === id)
+    if (!u) err('User not found')
+    if (u.role === 'admin' && db.users.filter((x) => x.role === 'admin').length <= 1) err('Cannot delete the only admin account.')
+    db.users = db.users.filter((x) => x.id !== id)
+    db.notifications = db.notifications.filter((n) => n.user_id !== id)
+    audit(db, null, me, 'DELETE_USER', `Deleted ${u.role} ${u.email}`); save(db)
+    return { ok: true }
+  }
   // ---- notifications ----
   if (url === '/api/notifications' && method === 'GET') return db.notifications.filter((n) => n.user_id === me.id).slice().reverse()
   if (seg[1] === 'notifications' && seg[3] === 'read' && method === 'POST') {

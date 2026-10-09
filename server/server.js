@@ -414,6 +414,24 @@ app.patch('/api/users/:id', auth, requireRole('admin'), wrap(async (req, res) =>
     { id: Number(req.params.id), role, approver_role });
   res.json({ ok: true });
 }));
+app.delete('/api/users/:id', auth, requireRole('admin'), wrap(async (req, res) => {
+  const id = Number(req.params.id);
+  // Safety checks: never let an admin delete their own account or the last admin.
+  if (id === req.user.id) return res.status(400).json({ error: 'You cannot delete your own account.' });
+  const target = await one('SELECT id,name,email,role FROM users WHERE id=$1', [id]);
+  if (!target) return res.status(404).json({ error: 'User not found' });
+  if (target.role === 'admin') {
+    const admins = await one('SELECT COUNT(*)::int AS n FROM users WHERE role=$1', ['admin']);
+    if ((admins?.n ?? 0) <= 1) return res.status(400).json({ error: 'Cannot delete the only admin account.' });
+  }
+  // Clean up the user's own notifications, then remove the account.
+  // Past requests and audit entries are left intact for the historical record.
+  await pool.query('DELETE FROM notifications WHERE user_id=$1', [id]);
+  await pool.query('DELETE FROM users WHERE id=$1', [id]);
+  await logAudit(null, req.user, 'user.delete', `Deleted ${target.role} ${target.email}`, clientIp(req),
+    { id, name: target.name, email: target.email, role: target.role });
+  res.json({ ok: true });
+}));
 
 // ---------- notifications ----------
 app.get('/api/notifications', auth, wrap(async (req, res) => {

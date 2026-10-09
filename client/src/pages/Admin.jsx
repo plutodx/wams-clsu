@@ -58,8 +58,20 @@ export default function Admin() {
 function Users() {
   const [rows, setRows] = useState([])
   const [open, setOpen] = useState(null) // 'add' | user object | null
+  const [me, setMe] = useState(null)
+  const [err, setErr] = useState('')
   const load = () => api('/api/users').then(setRows).catch(() => {})
   useEffect(() => { load() }, [])
+  useEffect(() => { api('/api/auth/me').then((d) => setMe(d.user)).catch(() => {}) }, [])
+
+  const remove = async (u) => {
+    setErr('')
+    if (!window.confirm(`Delete ${u.name} (${u.email})? This permanently removes the account and cannot be undone.`)) return
+    try {
+      await api(`/api/users/${u.id}`, { method: 'DELETE' })
+      load()
+    } catch (e) { setErr(e.message) }
+  }
 
   return (
     <div className="card">
@@ -67,6 +79,7 @@ function Users() {
         <strong>All users</strong>
         <button onClick={() => setOpen('add')}>+ Add user</button>
       </div>
+      {err && <div className="err" style={{ marginBottom: 10 }}>{err}</div>}
       <table>
         <thead><tr><th>Name</th><th>Role</th><th>Approver role</th><th>Office</th><th></th></tr></thead>
         <tbody>
@@ -77,7 +90,12 @@ function Users() {
               <td><span className="pill">{u.role}</span></td>
               <td>{u.approver_role || <span className="muted small">—</span>}</td>
               <td className="small muted">{u.office || '—'}</td>
-              <td style={{ textAlign: 'right' }}><button className="secondary small" onClick={() => setOpen(u)}>Edit</button></td>
+              <td style={{ textAlign: 'right', whiteSpace: 'nowrap' }}>
+                <button className="secondary small" onClick={() => setOpen(u)}>Edit</button>
+                {me && u.id !== me.id && (
+                  <button className="danger small" style={{ marginLeft: 8 }} onClick={() => remove(u)}>Delete</button>
+                )}
+              </td>
             </tr>
           ))}
         </tbody>
