@@ -112,7 +112,10 @@ app.post('/api/auth/register', wrap(async (req, res) => {
     message: 'Account created. Check your email for a verification link before signing in.',
     mailDelivered: Boolean(mail && mail.sent),
     mailPreviewUrl: (mail && mail.previewUrl) || null,
-    mailError: (mail && mail.error) || null });
+    mailError: (mail && mail.error) || null,
+    // If the email could not be delivered (no email configured, or a blocked relay),
+    // return the verification link so the user can activate from the screen directly.
+    demoVerifyUrl: (mail && mail.sent) ? null : `/verify?token=${token}` });
 }));
 
 app.get('/api/auth/verify', wrap(async (req, res) => {

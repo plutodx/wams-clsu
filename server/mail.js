@@ -13,12 +13,16 @@ const {
   SMTP_HOST, SMTP_PORT = '587', SMTP_USER, SMTP_PASS, SMTP_FROM, SMTP_SECURE,
   SMTP_ETHEREAL, BREVO_API_KEY, BREVO_SENDER_EMAIL, BREVO_SENDER_NAME,
   MAILJET_API_KEY, MAILJET_SECRET_KEY,
+  GMAIL_CLIENT_ID, GMAIL_CLIENT_SECRET, GMAIL_REFRESH_TOKEN,
 } = process.env;
 
-const USE_MAILJET = Boolean(MAILJET_API_KEY && MAILJET_SECRET_KEY);
-const USE_BREVO_API = !USE_MAILJET && Boolean(BREVO_API_KEY);
-const CONFIGURED = Boolean(SMTP_HOST && SMTP_USER && SMTP_PASS);
-const USE_ETHEREAL = !USE_MAILJET && !USE_BREVO_API && !CONFIGURED && String(SMTP_ETHEREAL).toLowerCase() === 'true';
+// Gmail API (HTTPS, port 443) - works on hosts that block SMTP ports (Railway/Render),
+// and sends from your own Gmail with no third-party relay review.
+const USE_GMAIL_API = Boolean(GMAIL_CLIENT_ID && GMAIL_CLIENT_SECRET && GMAIL_REFRESH_TOKEN);
+const USE_MAILJET = !USE_GMAIL_API && Boolean(MAILJET_API_KEY && MAILJET_SECRET_KEY);
+const USE_BREVO_API = !USE_GMAIL_API && !USE_MAILJET && Boolean(BREVO_API_KEY);
+const CONFIGURED = !USE_GMAIL_API && Boolean(SMTP_HOST && SMTP_USER && SMTP_PASS);
+const USE_ETHEREAL = !USE_GMAIL_API && !USE_MAILJET && !USE_BREVO_API && !CONFIGURED && String(SMTP_ETHEREAL).toLowerCase() === 'true';
 
 // Parse "Name <email@x.com>" (or a bare address) from SMTP_FROM for the API sender.
 function parseSender() {
@@ -31,7 +35,10 @@ function parseSender() {
 let transporter = null;
 let etherealReady = null; // a promise, created once
 
-if (USE_MAILJET) {
+if (USE_GMAIL_API) {
+  const s = parseSender();
+  console.log(`Email: Gmail API configured (sender ${s.email}). Emails will be delivered over HTTPS.`);
+} else if (USE_MAILJET) {
   const s = parseSender();
   console.log(`Email: Mailjet HTTP API configured (sender ${s.email}). Verification emails will be delivered over HTTPS.`);
 } else if (USE_BREVO_API) {
@@ -97,6 +104,49 @@ function logLink(to, verifyUrl, note) {
   console.log('==============================================\n');
 }
 
+// Exchange the long-lived refresh token for a short-lived access token (HTTPS).
+async function gmailAccessToken() {
+  const res = await fetch('https://oauth2.googleapis.com/token', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({
+      client_id: GMAIL_CLIENT_ID,
+      client_secret: GMAIL_CLIENT_SECRET,
+      refresh_token: GMAIL_REFRESH_TOKEN,
+      grant_type: 'refresh_token',
+    }),
+  });
+  if (!res.ok) throw new Error(`Gmail token ${res.status}: ${(await res.text()).slice(0, 200)}`);
+  return (await res.json()).access_token;
+}
+
+function b64url(str) {
+  return Buffer.from(str, 'utf8').toString('base64')
+    .replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+}
+
+async function sendViaGmailApi(to, msg) {
+  const sender = parseSender();
+  const accessToken = await gmailAccessToken();
+  // Encode the subject so non-ASCII characters survive (RFC 2047).
+  const subject = `=?UTF-8?B?${Buffer.from(msg.subject, 'utf8').toString('base64')}?=`;
+  const raw = [
+    `From: ${sender.name} <${sender.email}>`,
+    `To: ${to}`,
+    `Subject: ${subject}`,
+    'MIME-Version: 1.0',
+    'Content-Type: text/html; charset=UTF-8',
+    '',
+    msg.html || msg.text || '',
+  ].join('\r\n');
+  const res = await fetch('https://gmail.googleapis.com/gmail/v1/users/me/messages/send', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ raw: b64url(raw) }),
+  });
+  if (!res.ok) throw new Error(`Gmail API ${res.status}: ${(await res.text()).slice(0, 200)}`);
+}
+
 async function sendViaMailjet(to, msg) {
   const sender = parseSender();
   const auth = Buffer.from(`${MAILJET_API_KEY}:${MAILJET_SECRET_KEY}`).toString('base64');
@@ -149,6 +199,18 @@ async function sendViaBrevoApi(to, msg) {
 // fallbackLink is a URL printed to the console if no real sender is configured
 // (or a send fails), so the flow still works in console-only mode.
 async function deliver(to, msg, fallbackLink) {
+  // Mode 0: Gmail API over HTTPS (works where SMTP is blocked; sends from your own Gmail)
+  if (USE_GMAIL_API) {
+    try {
+      await sendViaGmailApi(to, msg);
+      return { sent: true };
+    } catch (e) {
+      console.error('Email: Gmail API send failed -', e.message);
+      if (fallbackLink) logLink(to, fallbackLink, 'Gmail API failed; use this link:');
+      return { simulated: true, error: e.message };
+    }
+  }
+
   // Mode 0a: Mailjet HTTP API
   if (USE_MAILJET) {
     try {
@@ -274,5 +336,5 @@ module.exports = {
   sendVerificationEmail,
   sendNotificationEmail,
   sendPasswordResetEmail,
-  EMAIL_CONFIGURED: CONFIGURED || USE_BREVO_API || USE_MAILJET,
+  EMAIL_CONFIGURED: CONFIGURED || USE_BREVO_API || USE_MAILJET || USE_GMAIL_API,
 };

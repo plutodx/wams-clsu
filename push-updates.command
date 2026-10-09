@@ -14,8 +14,24 @@ echo "==============================================="
 
 command -v git >/dev/null 2>&1 || { echo "ERROR: git is not installed."; echo "Install it from https://git-scm.com or use GitHub Desktop instead."; echo; read "?Press Return to close..."; exit 1; }
 
+# Clear any stale lock files left by a crashed git run
+rm -f .git/index.lock .git/HEAD.lock .git/objects/maintenance.lock 2>/dev/null
+
+# Make sure git knows who is committing (required, or commit silently fails)
+if [ -z "$(git config user.email)" ]; then
+  git config user.email "joy@luxurysocalrealty.com"
+  git config user.name "WAMS CLSU"
+  echo ">> Set git identity for this project."
+fi
+
 git add -A
-git commit -m "Fix signature display after login, add email notifications + password reset, Mailjet support" || echo "(nothing new to commit)"
+
+# Commit. If there is genuinely nothing to commit, say so but keep going.
+if git commit -m "Update WAMS: Gmail API email for live site ($(date '+%Y-%m-%d %H:%M'))"; then
+  echo ">> Changes committed."
+else
+  echo "(nothing new to commit - will still try to push what's here)"
+fi
 
 echo
 echo ">> Pushing..."
@@ -38,4 +54,5 @@ else
 fi
 
 echo
+echo "After it says SUCCESS, go back to Claude and say 'pushed'."
 read "?Press Return to close this window..."
